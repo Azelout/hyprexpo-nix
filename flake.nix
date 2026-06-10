@@ -16,7 +16,8 @@
           pkgs = nixpkgs.legacyPackages.${system};
         in {
           hyprexpo = pkgs.callPackage ./default.nix {
-            inherit (hyprland.packages.${system}) hyprland hyprlandPlugins;
+            hyprland = hyprland.packages.${system}.hyprland;
+            hyprlandPlugins = pkgs.hyprlandPlugins;  # ← vient de nixpkgs
           };
           default = self.packages.${system}.hyprexpo;
         }
