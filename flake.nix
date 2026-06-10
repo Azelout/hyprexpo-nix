@@ -11,12 +11,15 @@
     let
       forAllSystems = nixpkgs.lib.genAttrs (import systems);
     in {
-      packages = forAllSystems (system: {
-        hyprexpo = nixpkgs.legacyPackages.${system}.callPackage ./default.nix {
-          inherit (hyprland.packages.${system}) hyprland;
-          hyprlandPlugins = hyprland.packages.${system};
-        };
-        default = self.packages.${system}.hyprexpo;
-      });
+      packages = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in {
+          hyprexpo = pkgs.callPackage ./default.nix {
+            inherit (hyprland.packages.${system}) hyprland hyprlandPlugins;
+          };
+          default = self.packages.${system}.hyprexpo;
+        }
+      );
     };
 }
