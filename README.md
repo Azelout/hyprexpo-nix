@@ -74,11 +74,162 @@ cmake -S . -B build
 cmake --build build
 ```
 
-### Nix
+### NixOS + home-manager
 
-Nix users should build HyprExpo through the Nix Hyprland plugin path instead of mixing a `hyprpm` artifact into a Nix-managed Hyprland session. This repository includes `default.nix`, which uses `hyprlandPlugins.mkHyprlandPlugin` so the plugin follows the Hyprland input supplied by the caller.
+This section explains how to install and configure a Hyprland plugin declaratively using NixOS, Home Manager, and Nix flakes.
 
-Hyprland plugins are ABI-sensitive. Keep the plugin build and running Hyprland revision aligned.
+> **Prerequisites**: NixOS with flakes enabled, Home Manager set up as a NixOS module.
+
+---
+
+#### Overview
+
+On NixOS, plugins are **not** installed with `hyprpm` (the standard Hyprland plugin manager). Instead, they are declared in your Nix configuration and automatically compiled and loaded when you rebuild your system. This approach is fully reproducible — no manual steps required after the initial setup.
+
+The process has 4 steps:
+1. Add the plugin's flake as an input in `flake.nix`
+2. Pass it to Home Manager
+3. Declare it in `home.nix`
+4. Add a keybind in `hyprland.lua`
+
+---
+
+#### Step 1 — Add the plugin flake in `flake.nix`
+
+A flake is a Nix file that packages software in a reproducible way. Most community Hyprland plugins are distributed as flakes on GitHub.
+
+Open your `flake.nix` and add the plugin under `inputs`, alongside your other dependencies:
+
+```nix
+inputs = {
+  nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+
+  home-manager = {
+    url = "github:nix-community/home-manager/release-26.05";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  hyprland = {
+    type = "git";
+    url = "https://github.com/hyprwm/Hyprland";
+    submodules = true;
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  # ↓ Add this block for your plugin
+  hyprexpo-nix = {
+    url = "github:Azelout/hyprexpo-nix";
+    inputs.hyprland.follows = "hyprland"; # IMPORTANT: must match your Hyprland version
+  };
+};
+```
+
+> **Why `inputs.hyprland.follows = "hyprland"`?**
+> Hyprland plugins are compiled against a specific version of Hyprland. If the plugin uses a different version than your system, the build will fail with a cryptic header error. This line forces the plugin to use the exact same Hyprland version as the rest of your system.
+
+Then, still in `flake.nix`, pass `hyprexpo-nix` to Home Manager via `extraSpecialArgs` so it becomes available in `home.nix`:
+
+```nix
+outputs = { nixpkgs, home-manager, hyprland, hyprexpo-nix, ... }: {
+  nixosConfigurations.nixos = nixpkgs.lib.nixosSystem {
+    system = "x86_64-linux";
+    modules = [
+      ./configuration.nix
+      home-manager.nixosModules.home-manager
+      {
+        home-manager.useGlobalPkgs = true;
+        home-manager.useUserPackages = true;
+
+        # ↓ This makes hyprexpo-nix available in home.nix
+        home-manager.extraSpecialArgs = { inherit hyprexpo-nix; };
+        home-manager.users.YOUR_USERNAME = import ./home.nix;
+      }
+    ];
+  };
+};
+```
+
+---
+
+#### Step 2 — Declare the plugin in `home.nix`
+
+Open your `home.nix` and make sure the function signature accepts `hyprexpo-nix` as an argument. Then add it to the `plugins` list:
+
+```nix
+# home.nix
+{ pkgs, hyprexpo-nix, ... }: {  # ← hyprexpo-nix must be listed here
+
+  wayland.windowManager.hyprland = {
+    enable = true;
+
+    # Your existing Lua config is imported from a separate file
+    extraConfig = builtins.readFile ./hyprland.lua;
+
+    # Declare the plugin here — Home Manager compiles and loads it automatically
+    plugins = [
+      hyprexpo-nix.packages.${pkgs.system}.hyprexpo
+    ];
+  };
+
+}
+```
+
+> **How do I know the package name inside a flake?**
+> Run this command to list all packages a flake exposes:
+> ```bash
+> nix flake show github:Azelout/hyprexpo-nix --no-write-lock-file
+> ```
+> Look for lines under `packages.x86_64-linux`. The name after the last dot (e.g., `hyprexpo`) is what you use.
+
+---
+
+#### Step 3 — Add a keybind in `hyprland.lua`
+
+Since Hyprland 0.55, the config file is written in Lua. Add the following to your `hyprland.lua` to bind the plugin to a key:
+
+```lua
+-- Toggle the workspace overview with Super + Tab
+hl.bind("SUPER", "tab", hl.dsp.custom("hyprexpo:expo", "toggle"))
+
+-- Optional: customize the plugin's appearance
+hl.config.set("plugin:hyprexpo:columns", "3")           -- number of columns in the grid
+hl.config.set("plugin:hyprexpo:gap_size", "5")           -- gap between workspaces
+hl.config.set("plugin:hyprexpo:bg_col", "rgb(111,111,111)") -- background color
+hl.config.set("plugin:hyprexpo:workspace_method", "center current") -- center on current workspace
+```
+
+---
+
+#### Step 4 — Apply and verify
+
+Rebuild your system to apply the changes:
+
+```bash
+sudo nixos-rebuild switch
+```
+
+Then **fully restart your Hyprland session** — plugins are loaded when Hyprland starts, not when the config reloads. Logging out and back in (or switching to a TTY and running `loginctl terminate-session $XDG_SESSION_ID`) is required.
+
+After restarting, verify the plugin is loaded:
+
+```bash
+hyprctl plugin list
+```
+
+You should see your plugin listed with its name, version, and handle. If the list is empty, the session was not fully restarted.
+
+---
+
+#### Troubleshooting
+
+| Problem | Likely cause | Fix |
+|---|---|---|
+| `no plugins loaded` after rebuild | Session was not fully restarted | Log out and log back in — `hyprctl reload` is not enough |
+| Build error: `No such file or directory` (e.g. `LayoutManager.hpp`) | Version mismatch between the plugin and Hyprland | Make sure `inputs.hyprland.follows = "hyprland"` is set in the plugin input |
+| `Existing file would be clobbered` | A manually created `hyprland.lua` conflicts with Home Manager | Delete it first: `rm ~/.config/hypr/hyprland.lua`, then rebuild |
+| `cannot write modified lock file` when running `nix flake show` | No write permission in the current directory | Add the `--no-write-lock-file` flag to the command |
+| `attribute 'hyprexpo-nix' missing` in `home.nix` | The argument is not passed via `extraSpecialArgs` | Add `inherit hyprexpo-nix` to `home-manager.extraSpecialArgs` in `flake.nix` |
+
 
 ## Quick Config
 
